@@ -9,6 +9,7 @@ import io
 import os
 import base64
 from typing import List, Dict
+import re  # for emoji removal
 
 # Optional OCR / clipboard imports
 try:
@@ -190,6 +191,30 @@ def chunk_text(text: str, max_len: int = 600):
         parts.append(" ".join(buf))
     return [p.strip() for p in parts if p.strip()]
 
+# ─────────────────────────────────────
+# Text cleaning for TTS (remove emojis)
+# ─────────────────────────────────────
+EMOJI_PATTERN = re.compile(
+    "["
+    u"\U0001F600-\U0001F64F"  # emoticons
+    u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+    u"\U0001F680-\U0001F6FF"  # transport & map symbols
+    u"\U0001F1E0-\U0001F1FF"  # flags
+    u"\U00002700-\U000027BF"  # dingbats (✅ etc.)
+    u"\U0001F900-\U0001F9FF"  # supplemental symbols
+    u"\U0001FA70-\U0001FAFF"  # more symbols
+    u"\U00002600-\U000026FF"  # misc symbols (⚠️, ☑, etc.)
+    "]+",
+    flags=re.UNICODE,
+)
+
+def clean_for_tts(text: str) -> str:
+    """Remove emojis and collapse whitespace so TTS doesn't read them."""
+    if not text:
+        return ""
+    text = EMOJI_PATTERN.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 # ─────────────────────────────────────
 # Sidebar: Voice selection (MastersHub style)
@@ -275,7 +300,7 @@ with st.sidebar.expander("Choose a Voice (HD style list)", expanded=False):
 selected_voice = st.session_state.get("selected_voice", "en-US-JennyNeural")
 st.sidebar.success(f"Selected voice: {selected_voice}")
 
-# voice preview player (auto-play)
+# voice preview player (auto-play, with emoji cleaning)
 if "preview_voice" in st.session_state:
     pv = st.session_state.pop("preview_voice")
     with st.spinner(f"Synthesizing preview for {pv}…"):
@@ -283,6 +308,7 @@ if "preview_voice" in st.session_state:
             f"Hello from {pv}. "
             "This is a short preview from MastersHub twenty twenty three."
         )
+        sample_text = clean_for_tts(sample_text)
         out_path = asyncio.run(
             synthesize_to_file(sample_text, pv, rate_str, volume_str, ".mp3")
         )
@@ -332,7 +358,7 @@ if uploaded:
         )
         for p in pages:
             st.markdown(f"#### Page {p['index']}")
-            st.image(p["image"], use_column_width=True)
+            st.image(p["image"], use_container_width=True)
             if p["text"].strip():
                 with st.expander("Show extracted plain text"):
                     st.text(p["text"])
@@ -442,12 +468,12 @@ if image_sources:
         st.markdown(f"**Image {idx} — {label}**")
 
         if kind == "uploaded":
-            st.image(data, use_column_width=True)
+            st.image(data, use_container_width=True)
             pil_img = Image.open(data) if OCR_AVAILABLE else None
         else:  # clipboard bytes
             buf = io.BytesIO(data)
             pil_img = Image.open(buf) if OCR_AVAILABLE else None
-            st.image(pil_img, use_column_width=True)
+            st.image(pil_img, use_container_width=True)
 
         if OCR_AVAILABLE and pil_img is not None:
             text = pytesseract.image_to_string(pil_img).strip()
@@ -464,6 +490,7 @@ if image_sources:
 if image_sources and image_texts:
     if st.button("▶️ Read Text from Images in Order"):
         combined = "\n\n".join(image_texts)
+        combined = clean_for_tts(combined)
         chunks = chunk_text(combined, max_len=700)
         img_progress = st.progress(0.0, text="Synthesizing from images…")
 
@@ -522,7 +549,8 @@ if start_btn:
     if not custom_text.strip():
         st.warning("Please enter some text to read.")
     else:
-        chunks = chunk_text(custom_text, max_len=700)
+        tts_text = clean_for_tts(custom_text)
+        chunks = chunk_text(tts_text, max_len=700)
         progress = st.progress(0.0, text="Synthesizing…")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tf:
