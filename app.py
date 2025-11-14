@@ -9,7 +9,7 @@ import io
 import os
 import base64
 from typing import List, Dict
-import re  # for emoji removal
+import re  # for emoji & title handling
 
 # Optional OCR / clipboard imports
 try:
@@ -179,7 +179,7 @@ def chunk_text(text: str, max_len: int = 600):
     parts = []
     buf = []
     length = 0
-    for token in text.split(" "):
+    for token in text.split(" "):  # newlines remain inside tokens, that's fine
         if length + len(token) + 1 > max_len:
             parts.append(" ".join(buf))
             buf = [token]
@@ -192,7 +192,7 @@ def chunk_text(text: str, max_len: int = 600):
     return [p.strip() for p in parts if p.strip()]
 
 # ─────────────────────────────────────
-# Text cleaning for TTS (remove emojis)
+# Text cleaning & title handling for TTS
 # ─────────────────────────────────────
 EMOJI_PATTERN = re.compile(
     "["
@@ -209,12 +209,86 @@ EMOJI_PATTERN = re.compile(
 )
 
 def clean_for_tts(text: str) -> str:
-    """Remove emojis and collapse whitespace so TTS doesn't read them."""
+    """Remove emojis and normalize spaces while keeping line breaks."""
     if not text:
         return ""
+    # remove emojis
     text = EMOJI_PATTERN.sub("", text)
-    text = re.sub(r"\s+", " ", text)
+    # normalize spaces/tabs but preserve newlines
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    # strip spaces around lines
+    lines = [line.strip() for line in text.splitlines()]
+    text = "\n".join(lines)
+    # collapse 3+ blank lines to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+def _is_title_line(line: str, next_line: str | None) -> bool:
+    """
+    Heuristic to detect 'title-like' lines:
+    - non-empty
+    - reasonably short
+    - does not end with sentence punctuation
+    - first alphabetic char is uppercase
+    - there is a non-empty next line (content follows)
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if len(s) > 140:
+        return False
+    if s[-1] in ".?!;:":
+        return False
+
+    # find first alphabetic character
+    letters = [ch for ch in s if ch.isalpha()]
+    if not letters:
+        return False
+    if not letters[0].isupper():
+        return False
+
+    if next_line is None or not next_line.strip():
+        return False
+
+    return True
+
+def mark_titles_for_tts(text: str) -> str:
+    """
+    Detect title lines and:
+    - remove trailing dashes,
+    - add a period for a clear stop,
+    - insert a blank line after to create a pause.
+    """
+    lines = text.splitlines()
+    out_lines: list[str] = []
+    n = len(lines)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # look ahead for next non-empty line
+        next_line = None
+        for j in range(i + 1, n):
+            if lines[j].strip():
+                next_line = lines[j]
+                break
+
+        if _is_title_line(stripped, next_line):
+            # remove common trailing dash decorations
+            title = re.sub(r"[–—-]\s*$", "", stripped)
+            if not title.endswith("."):
+                title = title + "."
+            out_lines.append(title)
+            out_lines.append("")  # blank line for extra pause
+        else:
+            out_lines.append(line)
+
+    return "\n".join(out_lines).strip()
+
+def prepare_for_tts(raw_text: str) -> str:
+    """Full pipeline: emoji removal + title handling."""
+    cleaned = clean_for_tts(raw_text)
+    titled = mark_titles_for_tts(cleaned)
+    return titled
 
 # ─────────────────────────────────────
 # Sidebar: Voice selection (MastersHub style)
@@ -300,15 +374,15 @@ with st.sidebar.expander("Choose a Voice (HD style list)", expanded=False):
 selected_voice = st.session_state.get("selected_voice", "en-US-JennyNeural")
 st.sidebar.success(f"Selected voice: {selected_voice}")
 
-# voice preview player (auto-play, with emoji cleaning)
+# voice preview player (auto-play, with title/emoji handling)
 if "preview_voice" in st.session_state:
     pv = st.session_state.pop("preview_voice")
     with st.spinner(f"Synthesizing preview for {pv}…"):
         sample_text = (
-            f"Hello from {pv}. "
-            "This is a short preview from MastersHub twenty twenty three."
+            f"Hello from {pv}.\n"
+            "Preview of MastersHub twenty twenty three voice."
         )
-        sample_text = clean_for_tts(sample_text)
+        sample_text = prepare_for_tts(sample_text)
         out_path = asyncio.run(
             synthesize_to_file(sample_text, pv, rate_str, volume_str, ".mp3")
         )
@@ -490,7 +564,7 @@ if image_sources:
 if image_sources and image_texts:
     if st.button("▶️ Read Text from Images in Order"):
         combined = "\n\n".join(image_texts)
-        combined = clean_for_tts(combined)
+        combined = prepare_for_tts(combined)
         chunks = chunk_text(combined, max_len=700)
         img_progress = st.progress(0.0, text="Synthesizing from images…")
 
@@ -549,7 +623,7 @@ if start_btn:
     if not custom_text.strip():
         st.warning("Please enter some text to read.")
     else:
-        tts_text = clean_for_tts(custom_text)
+        tts_text = prepare_for_tts(custom_text)
         chunks = chunk_text(tts_text, max_len=700)
         progress = st.progress(0.0, text="Synthesizing…")
 
